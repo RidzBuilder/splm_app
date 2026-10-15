@@ -1,0 +1,95 @@
+name: Flutter Verification
+
+on:
+  push:
+    branches:
+      - codex/phase-02-baseline-remediation
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Record toolchain
+        run: |
+          flutter --version
+          dart --version
+
+      - name: Resolve dependencies
+        id: deps
+        continue-on-error: true
+        run: flutter pub get
+
+      - name: Static analysis
+        id: analyze
+        if: always()
+        continue-on-error: true
+        run: flutter analyze
+
+      - name: Automated tests
+        id: tests
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          if find test -type f -name '*_test.dart' -print -quit 2>/dev/null | grep -q .; then
+            flutter test
+          else
+            echo "::error::No Dart test files found under test/. Test gate is BLOCKED, not PASS."
+            exit 2
+          fi
+
+      - name: Android compile check using generated platform scaffold
+        id: android_build
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          flutter create --platforms=android --project-name splm_app "$tmp_dir/splm_app"
+          cp -R lib "$tmp_dir/splm_app/lib"
+          cp pubspec.yaml "$tmp_dir/splm_app/pubspec.yaml"
+          cd "$tmp_dir/splm_app"
+          flutter pub get
+          flutter build apk --debug
+
+      - name: Summarize verification gates
+        if: always()
+        env:
+          DEPENDENCIES: ${{ steps.deps.outcome }}
+          ANALYSIS: ${{ steps.analyze.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          ANDROID_BUILD: ${{ steps.android_build.outcome }}
+        run: |
+          {
+            echo "## SPLM verification gates"
+            echo ""
+            echo "| Gate | Outcome |"
+            echo "|---|---|"
+            echo "| Dependency resolution | ${DEPENDENCIES} |"
+            echo "| Static analysis | ${ANALYSIS} |"
+            echo "| Automated tests | ${TESTS} |"
+            echo "| Android compile check | ${ANDROID_BUILD} |"
+            echo ""
+            echo "No outcome is inferred from source inspection. Missing tests are BLOCKED, not PASS."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DEPENDENCIES" != "success" ] || [ "$ANALYSIS" != "success" ] || [ "$TESTS" != "success" ] || [ "$ANDROID_BUILD" != "success" ]; then
+            exit 1
+          fi
